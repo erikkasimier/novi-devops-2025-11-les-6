@@ -51,7 +51,7 @@ const port = process.env.PORT || 3000;
 ```
 
 ### Stap 2.2: Health Endpoint (aanbevolen)
-Voeg een health endpoint toe voor Render's health checks:
+Voeg een health endpoint toe wanneer je deze nog niet hebt voor Render's health checks:
 
 ```javascript
 app.get('/health', (req, res) => {
@@ -68,23 +68,49 @@ Zorg dat je Dockerfile correct is:
 
 ```dockerfile
 # Je multi-stage Dockerfile uit les 5
-FROM node:18-alpine AS build
+# Stage 1: Build
+FROM node:20-alpine AS builder
+
 WORKDIR /app
+
+# Kopieer package files
 COPY package*.json ./
+
+# Installeer alle dependencies (inclusief devDependencies voor build)
 RUN npm ci
-COPY ../../../Downloads/devops-opdrachten%202/les6-render-deployment .
 
-FROM node:18-alpine
+# Kopieer source code
+COPY . .
+
+# Stage 2: Production
+FROM node:20-alpine
+
 WORKDIR /app
-COPY --from=build /app .
 
-# Belangrijk: EXPOSE is documentatie, Render gebruikt PORT env var
+# Kopieer package files
+COPY package*.json ./
+
+# Installeer alleen production dependencies
+RUN npm ci --only=production
+
+# Kopieer source code (geen tests nodig in productie)
+COPY src ./src/
+
+# Maak non-root user voor security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 -G nodejs
+
+USER nodejs
+
+# Expose de poort
 EXPOSE 10000
 
-# Security: draai niet als root
-USER node
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:10000/health || exit 1
 
-CMD ["node", "app.js"]
+# Start de applicatie
+CMD ["node", "src/index.js"]
 ```
 
 ### Stap 2.4: Commit en Push
@@ -122,36 +148,60 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
-  # === Je bestaande jobs uit les 5 ===
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # ... je bestaande build steps ...
-
   test:
     runs-on: ubuntu-latest
-    needs: build
     steps:
-      # ... je bestaande test steps ...
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  push-image:
-    runs-on: ubuntu-latest
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+  build-and-push:
     needs: test
-    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      # ... je bestaande push steps ...
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }} .
+          docker tag ghcr.io/${{ github.repository }}:${{ github.sha }} ghcr.io/${{ github.repository }}:latest
+
+      - name: Push to GHCR
+        run: |
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}:latest
 
   # === NIEUWE DEPLOY JOB ===
   deploy:
     name: Deploy to Render
     runs-on: ubuntu-latest
-    needs: push-image  # Wacht tot image gepusht is
+    needs: build-and-push  # Wacht tot image gepusht is
     if: github.ref == 'refs/heads/main'  # Alleen op main branch
     
     steps:
@@ -193,7 +243,7 @@ Bekijk de Actions tab in GitHub - je ziet nu een extra "Deploy to Render" job!
 Open je Render URL en test:
 - `/` - Root endpoint
 - `/health` - Health check
-- `/api/greeting?name=DevOps` - API endpoint (als je die hebt)
+- `/api/items` - API endpoint (als je die hebt)
 
 ### Stap 4.4: Test de Complete Flow
 Maak een kleine wijziging om de hele pipeline te testen:
