@@ -167,7 +167,7 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-        
+
       - name: Run linter
         run: npm run lint
 
